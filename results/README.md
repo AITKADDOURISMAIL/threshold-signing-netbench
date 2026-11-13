@@ -14,3 +14,8 @@ Two laptops: machine A (Intel Core i5-1035G1, 8 GB) and machine B (Intel Core 3 
 | wifi2 (frost-pre), wifi3 | public Wi-Fi W2, day 2 | 0 | Wi-Fi power saving disabled on machine B |
 | wan25v3 (frost-pre), wan50v3 (frost-pre) | W2 | 25 / 50 ms | used |
 | wan50v2 (frost-pre) | W2 | 50 ms | machine B ran with 25 ms by mistake, not used |
+| pson25, pson25b, pson25c | H, Wi-Fi power saving of machine A set to maximum power saving | 25 ms | A/B test (CGGMP reduced to 5 or 1 signatures) |
+| psoff25, psoff25b, psoff25c | H, Wi-Fi power saving of machine A set to maximum performance | 25 ms | A/B test, alternated with the runs above |
+
+`throughput.csv`: sustained throughput on H (label `home`, no added delay), with 16 FROST
+signatures or 4 CGGMP signatures in flight (`experiments.ps1 -Set throughput`).

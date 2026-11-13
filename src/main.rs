@@ -65,6 +65,7 @@ struct Args {
     label: String,
     out: String,
     delay_ms: f64,
+    concurrency: usize,
 }
 
 fn parse_args() -> Args {
@@ -79,6 +80,7 @@ fn parse_args() -> Args {
         label: "net".into(),
         out: "results".into(),
         delay_ms: 0.0,
+        concurrency: 1,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -95,6 +97,7 @@ fn parse_args() -> Args {
             "--label" => a.label = val(),
             "--out" => a.out = val(),
             "--delay-ms" => a.delay_ms = val().parse().expect("--delay-ms"),
+            "--concurrency" => a.concurrency = val().parse().expect("--concurrency"),
             "-h" | "--help" => {
                 println!("see the header of src/main.rs or README.md");
                 std::process::exit(0);
@@ -767,7 +770,7 @@ fn coordinator(args: &Args, n: usize, net: &mut Network, signer: &mut Signer) {
         net.send(p, Net::Quit);
     }
 
-    // 3. Summary, with the analytic model of the journal article:
+    // 3. Summary, with the analytic model of the paper:
     //    latency = CPU on the critical path + one-way delay x sequential steps.
     //    Steps counted here include the request (Start) and, for CGGMP, the
     //    final report (Done): FROST 1+3 = 4, FROST with preprocessing 2
@@ -794,6 +797,133 @@ fn coordinator(args: &Args, n: usize, net: &mut Network, signer: &mut Signer) {
                  median(&off), median(&on));
     }
     println!("       written to {path} and {summary}");
+}
+
+// ===========================================================================
+// Throughput mode (node 0, --concurrency K > 1)
+// ===========================================================================
+
+/// Keeps K signing sessions in flight and measures how many signatures per
+/// second the group sustains. Each node handles all its sessions on one thread
+/// (one core per node). For frost-pre, commitments are published beforehand
+/// (not timed), so the result is the throughput of the online phase.
+fn throughput(args: &Args, n: usize, net: &mut Network, signer: &mut Signer) {
+    let mut inbox = Inbox::default();
+    let k = args.concurrency;
+    let total = args.count;
+    let signer_ids: Vec<u8> = (0..args.t as u8).collect();
+    let peers: Vec<u8> = (1..n as u8).collect();
+    // RTT, for the record
+    let mut rtts = Vec::new();
+    for (q, &p) in peers.iter().enumerate() {
+        let key = 1_000_000 + q as u32;
+        let t0 = Instant::now();
+        net.send(p, Net::Ping { k: key });
+        while !inbox.pongs.contains_key(&key) {
+            pump(net, signer, &mut inbox);
+        }
+        rtts.push(ms(inbox.pongs[&key] - t0));
+    }
+    if args.proto == "frost-pre" {
+        println!("preprocessing: collecting {total} commitments per signer (not timed)...");
+        for &s in &signer_ids {
+            net.send(s, Net::Precompute { start: 0, count: total as u32 });
+        }
+        while (0..total as u32).any(|q| inbox.commits.get(&q).map_or(0, |m| m.len()) < args.t) {
+            pump(net, signer, &mut inbox);
+        }
+    }
+    println!("throughput: {total} signatures, {k} in flight, protocol {}, ({},{})", args.proto, args.t, n);
+    // per in-flight signature: start time, digest, FROST signing package (once built)
+    let mut flight: BTreeMap<u32, (Instant, [u8; 32], Option<frost::SigningPackage>)> = BTreeMap::new();
+    let mut lat = Vec::new();
+    let mut next = 0u32;
+    let mut done = 0usize;
+    let t_start = Instant::now();
+    let build_pkg = |inbox: &mut Inbox, seq: u32, digest: &[u8; 32]| -> frost::SigningPackage {
+        let commits: BTreeMap<_, _> = inbox.commits.remove(&seq).unwrap().into_iter()
+            .map(|(i, b)| (frost::Identifier::try_from(i as u16 + 1).unwrap(),
+                           frost::round1::SigningCommitments::deserialize(&b).unwrap()))
+            .collect();
+        frost::SigningPackage::new(commits, digest)
+    };
+    while done < total {
+        while flight.len() < k && (next as usize) < total {
+            let seq = next;
+            next += 1;
+            let mut digest = [0u8; 32];
+            OsRng.fill_bytes(&mut digest);
+            let t0 = Instant::now();
+            if args.proto == "frost-pre" {
+                let pkg = build_pkg(&mut inbox, seq, &digest);
+                let data = pkg.serialize().unwrap();
+                for &s in &signer_ids {
+                    net.send(s, Net::FrostPkg { seq, data: data.clone() });
+                }
+                flight.insert(seq, (t0, digest, Some(pkg)));
+            } else {
+                for &s in &signer_ids {
+                    net.send(s, Net::Start { seq, digest });
+                }
+                flight.insert(seq, (t0, digest, None));
+            }
+        }
+        pump(net, signer, &mut inbox);
+        let keys: Vec<u32> = flight.keys().cloned().collect();
+        for seq in keys {
+            if args.proto.starts_with("frost") {
+                if flight[&seq].2.is_none() && inbox.commits.get(&seq).map_or(0, |m| m.len()) >= args.t {
+                    let digest = flight[&seq].1;
+                    let pkg = build_pkg(&mut inbox, seq, &digest);
+                    let data = pkg.serialize().unwrap();
+                    for &s in &signer_ids {
+                        net.send(s, Net::FrostPkg { seq, data: data.clone() });
+                    }
+                    flight.get_mut(&seq).unwrap().2 = Some(pkg);
+                }
+                if flight[&seq].2.is_some() && inbox.shares.get(&seq).map_or(0, |m| m.len()) >= args.t {
+                    let (t0, digest, pkg) = flight.remove(&seq).unwrap();
+                    let pkg = pkg.unwrap();
+                    let shares: BTreeMap<_, _> = inbox.shares.remove(&seq).unwrap().into_iter()
+                        .map(|(i, b)| (frost::Identifier::try_from(i as u16 + 1).unwrap(),
+                                       frost::round2::SignatureShare::deserialize(&b).unwrap()))
+                        .collect();
+                    let fk = signer.frost.as_ref().unwrap();
+                    let sig = frost::aggregate(&pkg, &shares, &fk.pubkeys).expect("aggregate");
+                    fk.pubkeys.verifying_key().verify(&digest, &sig).expect("FROST signature must verify");
+                    lat.push(ms(t0.elapsed()));
+                    done += 1;
+                }
+            } else if inbox.done.get(&seq).map_or(0, |m| m.len()) >= args.t {
+                let d = inbox.done.remove(&seq).unwrap();
+                assert!(d.values().all(|x| x.3), "a CGGMP session failed");
+                let (t0, _, _) = flight.remove(&seq).unwrap();
+                lat.push(ms(t0.elapsed()));
+                signer.runs.remove(&seq);
+                signer.finished.insert(seq);
+                done += 1;
+            }
+        }
+    }
+    let elapsed = t_start.elapsed().as_secs_f64();
+    let rate = total as f64 / elapsed;
+    for &p in &peers {
+        net.send(p, Net::Quit);
+    }
+    fs::create_dir_all(&args.out).ok();
+    let path = format!("{}/throughput.csv", args.out);
+    let new = !std::path::Path::new(&path).exists();
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    if new {
+        writeln!(f, "label,proto,t,n,concurrency,signatures,elapsed_s,signatures_per_s,latency_median_ms,rtt_max_ms").unwrap();
+    }
+    let rtt = rtts.iter().cloned().fold(0.0, f64::max);
+    writeln!(f, "{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3}", args.label, args.proto, args.t, n, k, total,
+             elapsed, rate, median(&lat), rtt).unwrap();
+    println!();
+    println!("THROUGHPUT {} ({},{}) on '{}': {:.2} signatures/s ({} signatures in {:.1} s, {} in flight, median latency {:.1} ms)",
+             args.proto, args.t, n, args.label, rate, total, elapsed, k, median(&lat));
+    println!("       written to {path}");
 }
 
 // ===========================================================================
@@ -832,7 +962,10 @@ fn main() {
         early: HashMap::new(),
         finished: HashSet::new(),
     };
-    if args.id == 0 {
+    if args.id == 0 && args.concurrency > 1 {
+        throughput(&args, n, &mut net, &mut signer);
+        thread::sleep(Duration::from_millis(300));
+    } else if args.id == 0 {
         coordinator(&args, n, &mut net, &mut signer);
         thread::sleep(Duration::from_millis(300));
     } else {

@@ -8,7 +8,7 @@ M. Lahby; submitted to IWCMC 2027).
 - `results/`: all measurements (see `results/README.md` for which series are used)
 - `analysis/`: figures of the paper and the script that produces them (`python analysis/plot_net.py`)
 
-## net-bench: FROST vs CGGMP threshold signing over a real network
+#net-bench: FROST vs CGGMP threshold signing over a real network
 
 Each party is a separate process, normally on a separate machine, and the
 parties exchange messages over TCP. Node 0 is the coordinator and one of the
@@ -18,7 +18,7 @@ and, for CGGMP, the split between presigning (rounds 1-3, independent of the
 message) and online signing (round 4).
 
 The output `results/summary.csv` also gives the latency predicted by the
-analytic model of the journal article (CPU on the critical path + one-way
+analytic latency model of the paper (CPU on the critical path + one-way
 delay x sequential steps), so the model can be checked against measurements.
 
 ## Build (on every machine)
@@ -61,6 +61,8 @@ net-bench --id <i> --config nodes.txt --proto frost|frost-pre|cggmp --t <t> [--c
 
 `nodes.txt` contains one line per node, `<id> <host>:<port>`, ids 0..n-1. Node i
 connects to every node j > i.
+
+`--concurrency K` (K > 1) switches node 0 to throughput mode: K signatures are kept in flight and the sustained rate (signatures per second) is written to `results/throughput.csv`. With `experiments.ps1`, use `-Set throughput`.
 
 `--proto frost-pre` runs FROST with preprocessing: before the timed signatures,
 every signer publishes one commitment per future signature (round 1 done in

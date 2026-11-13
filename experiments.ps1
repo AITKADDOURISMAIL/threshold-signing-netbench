@@ -9,6 +9,8 @@
 #   (2,3): A = nodes 0,2   B = node 1          signers 0,1
 #   (3,5): A = nodes 0,2,4 B = nodes 1,3       signers 0,1,2
 #
+# -Set throughput measures sustained signatures per second (several signatures
+# in flight); results in results\throughput.csv.
 # -Set frostpre runs only FROST with preprocessed commitments (RFC 9591 allows
 # round 1 to be done in advance), in the (2,3) and (3,5) configurations.
 #
@@ -23,7 +25,7 @@ param(
     [int]$FrostCount = 200,
     [int]$CggmpCount = 20,
     # all = FROST and CGGMP; frostpre = FROST with preprocessed commitments only
-    [ValidateSet("all", "frostpre")][string]$Set = "all"
+    [ValidateSet("all", "frostpre", "throughput")][string]$Set = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,7 +34,13 @@ if (-not (Test-Path $exe)) { throw "Build first: cargo build --release" }
 New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot "logs") | Out-Null
 
 # experiment list: protocol, t, n  (same order on both machines)
-if ($Set -eq "frostpre") {
+if ($Set -eq "throughput") {
+    # protocol, t, n, signatures in flight, number of signatures
+    $experiments = @(
+        @("frost", 2, 3, 16, 2000), @("frost-pre", 2, 3, 16, 2000), @("cggmp", 2, 3, 4, 12),
+        @("frost", 3, 5, 16, 2000), @("frost-pre", 3, 5, 16, 2000), @("cggmp", 3, 5, 4, 8)
+    )
+} elseif ($Set -eq "frostpre") {
     $experiments = @( @("frost-pre", 2, 3), @("frost-pre", 3, 5) )
 } else {
     $experiments = @(
@@ -63,6 +71,8 @@ foreach ($e in $experiments) {
     Write-Host "=== experiment $k : $proto ($t,$n) on '$Label' (machine $Machine) ===" -ForegroundColor Cyan
     $mine = $placement[$n][$Machine]
     $count = if ($proto -like "frost*") { $FrostCount } else { $CggmpCount }
+    $conc = 1
+    if ($e.Count -ge 5) { $conc = $e[3]; $count = $e[4] }
     $bg = @()
     foreach ($id in $mine) {
         if ($id -eq 0) { continue }
@@ -72,7 +82,7 @@ foreach ($e in $experiments) {
             -ArgumentList "--id $id --config `"$cfg`" --proto $proto --t $t --delay-ms $DelayMs"
     }
     if ($mine -contains 0) {
-        & $exe --id 0 --config $cfg --proto $proto --t $t --count $count --label $Label --delay-ms $DelayMs
+        & $exe --id 0 --config $cfg --proto $proto --t $t --count $count --label $Label --delay-ms $DelayMs --concurrency $conc
         if ($LASTEXITCODE -ne 0) { throw "coordinator failed" }
     }
     foreach ($p in $bg) { $p.WaitForExit() }

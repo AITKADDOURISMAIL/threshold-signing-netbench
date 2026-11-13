@@ -1,0 +1,7 @@
+label,proto,t,n,concurrency,signatures,elapsed_s,signatures_per_s,latency_median_ms,rtt_max_ms
+home,frost,2,3,16,2000,4.053,493.410,28.088,6.069
+home,frost-pre,2,3,16,2000,2.839,704.524,21.027,6.663
+home,cggmp,2,3,4,12,13.601,0.882,4449.142,7.481
+home,frost,3,5,16,2000,5.369,372.476,29.919,22.380
+home,frost-pre,3,5,16,2000,3.084,648.552,22.653,5.992
+home,cggmp,3,5,4,8,27.490,0.291,13739.387,12.529
