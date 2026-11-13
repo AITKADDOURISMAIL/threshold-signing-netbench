@@ -1,0 +1,22 @@
+[package]
+name = "net-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Networked FROST vs CGGMP threshold signing: each party is a separate process on a separate machine"
+
+[dependencies]
+synedrion = { version = "0.3", features = ["k256"] }
+manul = { version = "0.2", features = ["dev"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+ecdsa = "0.16"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+rand_chacha = "0.3"
+postcard = { version = "1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+frost-secp256k1-tr = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
